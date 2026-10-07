@@ -3,7 +3,7 @@
 --  Window / Tab / Grid / Section 시스템
 --  위젯은 widgets/*.lua 에서 불러와서 Section 메서드로 붙임
 --==========================================================================
-local BASE = "https://cdn.jsdelivr.net/gh/jixyuk12nh-maker/kicia-ui@main/"
+local BASE = "https://cdn.jsdelivr.net/gh/jixyuk12nh-maker/Uii@main/"
 
 -- 이미 로드된 인스턴스 있으면 정리
 if getgenv().KiciaUI and getgenv().KiciaUI.Unload then
