@@ -1,46 +1,217 @@
 --==========================================================================
---  Kicia UI — Main Frame
---  Window / Tab / Grid / Section 시스템
---  위젯은 widgets/*.lua 에서 불러와서 Section 메서드로 붙임
+--  Kicia UI — single file
+--  GitHub: jixyuk12nh-maker/Uii
+--  Load:
+--    local UI = loadstring(game:HttpGet(
+--        "https://cdn.jsdelivr.net/gh/jixyuk12nh-maker/Uii@main/ui.lua"
+--    ))()
 --==========================================================================
-local BASE = "https://cdn.jsdelivr.net/gh/jixyuk12nh-maker/Uii@main/"
-
--- 이미 로드된 인스턴스 있으면 정리
 if getgenv().KiciaUI and getgenv().KiciaUI.Unload then
     pcall(getgenv().KiciaUI.Unload)
 end
 
-local function fetch(rel)
-    local url = BASE .. rel
-    local src = game:HttpGet(url)
-    assert(#src > 0, "KiciaUI: empty response for " .. url)
-    local fn, err = loadstring(src, "KiciaUI/" .. rel)
-    assert(fn, "KiciaUI: compile error in " .. rel .. ": " .. tostring(err))
-    return fn()
+local K = { destroyed = false, cleanups = {} }
+getgenv().KiciaUI = K
+local function onUnload(f) table.insert(K.cleanups, f) end
+
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+
+--==========================================================================
+--  Signal
+--==========================================================================
+local Signal = {}
+Signal.__index = Signal
+function Signal.new() return setmetatable({ _handlers = {} }, Signal) end
+function Signal:Connect(fn)
+    local h = { fn = fn, connected = true }
+    table.insert(self._handlers, h)
+    local sig = self
+    return { Connected = true, Disconnect = function(c)
+        if not h.connected then return end
+        h.connected = false; c.Connected = false
+        local i = table.find(sig._handlers, h)
+        if i then table.remove(sig._handlers, i) end
+    end }
+end
+function Signal:Once(fn)
+    local c; c = self:Connect(function(...) c:Disconnect() fn(...) end); return c
+end
+function Signal:Fire(...)
+    for _, h in ipairs(table.clone(self._handlers)) do
+        if h.connected then task.spawn(h.fn, ...) end
+    end
+end
+function Signal:Destroy() table.clear(self._handlers) end
+
+--==========================================================================
+--  Trove
+--==========================================================================
+local Trove = {}
+Trove.__index = Trove
+function Trove.new(name) return setmetatable({ _name = name, _items = {} }, Trove) end
+local function cleanItem(o)
+    local t = typeof(o)
+    if t == "RBXScriptConnection" then o:Disconnect()
+    elseif t == "Instance" then pcall(function() o:Destroy() end)
+    elseif t == "thread" then pcall(task.cancel, o)
+    elseif type(o) == "function" then pcall(o)
+    elseif type(o) == "table" then
+        local function member(k)
+            local ok, v = pcall(function() return o[k] end)
+            return ok and type(v) == "function" and v or nil
+        end
+        local d = member("Destroy"); if d then pcall(d, o) return end
+        local dc = member("Disconnect"); if dc then pcall(dc, o) end
+    end
+end
+function Trove:Add(o) table.insert(self._items, o) return o end
+function Trove:Connect(sig, fn) return self:Add(sig:Connect(fn)) end
+function Trove:Extend() return self:Add(Trove.new(self._name)) end
+function Trove:Remove(o, keep)
+    local i = table.find(self._items, o)
+    if i then table.remove(self._items, i) if not keep then cleanItem(o) end end
+end
+function Trove:Clean()
+    local items = self._items; self._items = {}
+    for i = #items, 1, -1 do cleanItem(items[i]) end
+end
+Trove.Destroy = Trove.Clean
+
+--==========================================================================
+--  Tokens
+--==========================================================================
+local Tokens = {
+    Accent = Color3.fromRGB(154, 213, 222),
+    Outline = Color3.fromRGB(24, 25, 24),
+    Background = Color3.fromRGB(0, 0, 0),
+    ElementBackground = Color3.fromRGB(6, 6, 6),
+    TabButtonSelected = Color3.fromRGB(51, 65, 70),
+    Unselected = Color3.fromRGB(75, 72, 72),
+    TextColor = Color3.fromRGB(197, 197, 197),
+    ToggleCircleUnselected = Color3.fromRGB(70, 85, 87),
+    ToggleBackgroundUnselected = Color3.fromRGB(12, 13, 13),
+    GradientTop = Color3.fromRGB(14, 16, 16),
+    GradientMid = Color3.fromRGB(6, 6, 6),
+    GradientDark = Color3.fromRGB(3, 3, 3),
+    GradientDeep = Color3.fromRGB(0, 0, 0),
+    TabHighlight = Color3.fromRGB(51, 65, 70),
+    TabShadow = Color3.fromRGB(30, 51, 61),
+}
+
+--==========================================================================
+--  Fonts
+--==========================================================================
+local Fonts = {
+    Main     = Font.new("rbxassetid://12187365364", Enum.FontWeight.Medium, Enum.FontStyle.Normal),
+    SemiBold = Font.new("rbxassetid://12187365364", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal),
+    Bold     = Font.new("rbxassetid://12187365364", Enum.FontWeight.Bold, Enum.FontStyle.Normal),
+}
+
+--==========================================================================
+--  Util
+--==========================================================================
+local Util = {}
+function Util.currentViewportSize()
+    local c = workspace.CurrentCamera
+    return c and c.ViewportSize or Vector2.new(1920, 1080)
+end
+function Util.gethui()
+    local f = getfenv(0).gethui
+    if type(f) == "function" then
+        local ok, h = pcall(f)
+        if ok and h then return h end
+    end
+    return game:GetService("CoreGui")
+end
+function Util.findScrollingAncestor(inst)
+    local p = inst and inst.Parent
+    while p do
+        if p:IsA("ScrollingFrame") then return p end
+        p = p.Parent
+    end
+end
+function Util.clampGuiToViewport(gui)
+    local vp = Util.currentViewportSize()
+    local ap, as = gui.AbsolutePosition, gui.AbsoluteSize
+    local dx = math.clamp(ap.X, 0, math.max(0, vp.X - as.X)) - ap.X
+    local dy = math.clamp(ap.Y, 0, math.max(0, vp.Y - as.Y)) - ap.Y
+    if dx ~= 0 or dy ~= 0 then
+        local p = gui.Position
+        gui.Position = UDim2.new(p.X.Scale, p.X.Offset + dx, p.Y.Scale, p.Y.Offset + dy)
+    end
 end
 
 --==========================================================================
---  코어 로드
+--  Batch
 --==========================================================================
-local Core = fetch("lib/core.lua")
-local Signal = Core.Signal
-local Trove = Core.Trove
-local Tokens = Core.Tokens
-local Batch = Core.Batch
-local Util = Core.Util
-
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-
-local K = { destroyed = false, cleanups = {} }
-getgenv().KiciaUI = K
-
-function K.onUnload(f) table.insert(K.cleanups, f) end
+local Batch = {}
+Batch.__index = Batch
+local batchRegistry = setmetatable({}, { __mode = "k" })
+local function buildGradient(tokens, times)
+    if #tokens == 1 then return ColorSequence.new(Tokens[tokens[1]]) end
+    local kps = {}
+    for i, tok in ipairs(tokens) do
+        local t = times ~= nil and times[i] or (i - 1) / (#tokens - 1)
+        kps[i] = ColorSequenceKeypoint.new(t, Tokens[tok])
+    end
+    return ColorSequence.new(kps)
+end
+function Batch.new()
+    return setmetatable({ _prop = {}, _grad = {}, _state = {}, _set = {} }, Batch)
+end
+function Batch:Bind(inst, prop, token)
+    inst[prop] = Tokens[token]
+    local b = self._prop[token] or {}; self._prop[token] = b
+    table.insert(b, { Instance = inst, Property = prop })
+    self:_mark(token)
+end
+function Batch:BindGradient(g, tokens, times)
+    g.Color = buildGradient(tokens, times)
+    table.insert(self._grad, { Gradient = g, Tokens = tokens, Times = times })
+    for _, t in ipairs(tokens) do self:_mark(t) end
+end
+function Batch:BindStateful(token, fn)
+    local b = self._state[token] or {}; self._state[token] = b
+    table.insert(b, fn); self:_mark(token)
+end
+function Batch:_mark(token)
+    if self._set[token] then return end
+    self._set[token] = true
+    local s = batchRegistry[token] or {}; batchRegistry[token] = s
+    s[self] = true
+end
+function Batch:Destroy()
+    for t in next, self._set do
+        local s = batchRegistry[t]; if s then s[self] = nil end
+    end
+    table.clear(self._set); table.clear(self._prop)
+    table.clear(self._grad); table.clear(self._state)
+end
+function Batch.newBatch(parent)
+    local b = Batch.new(); if parent then parent:Add(b) end; return b
+end
+Batch.get = function(t) return Tokens[t] end
+function Batch.refresh(token, color)
+    if Tokens[token] == color then return end
+    Tokens[token] = color
+    local s = batchRegistry[token]; if s == nil then return end
+    for b in next, s do
+        local props = b._prop[token]
+        if props then for _, p in ipairs(props) do p.Instance[p.Property] = color end end
+        for _, g in ipairs(b._grad) do
+            if table.find(g.Tokens, token) then
+                g.Gradient.Color = buildGradient(g.Tokens, g.Times)
+            end
+        end
+        local st = b._state[token]
+        if st then for _, f in ipairs(st) do f(color) end end
+    end
+end
 
 --==========================================================================
---  Row (행 컨테이너 — 모든 위젯의 부모)
+--  Row
 --==========================================================================
 local Row = {}
 Row.__index = Row
@@ -109,7 +280,7 @@ function Row:SetLabel(l)
 end
 
 --==========================================================================
---  Section (엘리먼트 나열 컨테이너)
+--  Section
 --==========================================================================
 local Section = {}
 Section.__index = Section
@@ -195,7 +366,6 @@ function Section:_AddRow(row, spec)
     return row
 end
 
---  위젯 팩토리 (widgets/*.lua 가 여기로 주입됨)
 Section._Factories = {}
 function Section:AddToggle(spec)
     local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
@@ -245,7 +415,733 @@ end
 function Section:SetTitle(t) self.Title = t end
 
 --==========================================================================
---  Grid (섹션을 컬럼으로 배치)
+--  Widget: Toggle
+--==========================================================================
+local Toggle = {}
+Toggle.__index = Toggle
+local function makeToggle(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Value = spec.Default == true, Changed = Signal.new(),
+        _onChanged = spec.OnChanged or function() end, _rt = nil,
+    }, Toggle)
+    row:AttachRight(function(parent)
+        local track = Instance.new("Frame")
+        track.AnchorPoint = Vector2.new(1, 0.5)
+        track.Position = UDim2.fromScale(1, 0.5)
+        track.Size = UDim2.fromOffset(32, 20)
+        track.BorderSizePixel = 0
+        track.BackgroundColor3 = Tokens.ToggleBackgroundUnselected
+        track.Parent = parent
+        Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.fromScale(1, 1)
+        fill.BorderSizePixel = 0
+        fill.BackgroundColor3 = Tokens.Accent
+        fill.BackgroundTransparency = 1
+        fill.Parent = track
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+        local circle = Instance.new("Frame")
+        circle.Position = UDim2.fromOffset(3, 2)
+        circle.Size = UDim2.fromOffset(16, 16)
+        circle.BorderSizePixel = 0
+        circle.BackgroundColor3 = Tokens.ToggleCircleUnselected
+        circle.Parent = track
+        Instance.new("UICorner", circle).CornerRadius = UDim.new(1, 0)
+        obj._rt = { Track = track, Fill = fill, Circle = circle }
+        local function apply(v, instant)
+            if instant then
+                fill.BackgroundTransparency = v and 0 or 1
+                circle.BackgroundColor3 = v and Tokens.Accent or Tokens.ToggleCircleUnselected
+                circle.Position = v and UDim2.fromOffset(13, 2) or UDim2.fromOffset(3, 2)
+                return
+            end
+            local info = TweenInfo.new(0.1)
+            TweenService:Create(fill, info, { BackgroundTransparency = v and 0 or 1 }):Play()
+            TweenService:Create(circle, info, {
+                BackgroundColor3 = v and Tokens.Accent or Tokens.ToggleCircleUnselected,
+                Position = v and UDim2.fromOffset(13, 2) or UDim2.fromOffset(3, 2),
+            }):Play()
+        end
+        apply(obj.Value, true)
+        trove:Connect(obj.Changed, function(v) apply(v) end)
+        trove:Connect(obj.Row.Frame.InputBegan, function(input)
+            local t = input.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                obj:Set(not obj.Value)
+            end
+        end)
+        return track
+    end, 32)
+    return obj
+end
+function Toggle:Set(v, instant)
+    if type(v) ~= "boolean" or v == self.Value then return end
+    self.Value = v
+    if instant then
+        local rt = self._rt
+        if rt then
+            rt.Fill.BackgroundTransparency = v and 0 or 1
+            rt.Circle.BackgroundColor3 = v and Tokens.Accent or Tokens.ToggleCircleUnselected
+            rt.Circle.Position = v and UDim2.fromOffset(13, 2) or UDim2.fromOffset(3, 2)
+        end
+    else
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function Toggle:SetVisible(v) self.Row:SetVisible(v) end
+function Toggle:OnChanged(fn) self._trove:Connect(self.Changed, fn) return self end
+
+--==========================================================================
+--  Widget: Button
+--==========================================================================
+local Button = {}
+Button.__index = Button
+local function makeButton(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row, Label = spec.Label or "Button",
+        Clicked = Signal.new(), _onClick = spec.OnClick or function() end,
+        _variant = spec.Variant or "default", _title = nil,
+    }, Button)
+    row:AttachRight(function(parent)
+        local btn = Instance.new("TextButton")
+        btn.AnchorPoint = Vector2.new(1, 0.5)
+        btn.Position = UDim2.fromScale(1, 0.5)
+        btn.Size = UDim2.fromOffset(120, 22)
+        btn.BorderSizePixel = 0
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.BackgroundColor3 = obj._variant == "primary" and Tokens.Accent or Tokens.ElementBackground
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+        local stroke = Instance.new("UIStroke", btn)
+        stroke.Color = Tokens.Outline
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.fromScale(1, 1)
+        label.Text = obj.Label
+        label.TextSize = 14
+        label.FontFace = menu.Fonts.SemiBold
+        label.TextColor3 = obj._variant == "primary" and Color3.new(1, 1, 1) or Tokens.TextColor
+        label.BorderSizePixel = 0
+        label.Parent = btn
+        obj._title = label
+        trove:Connect(btn.MouseButton1Click, function()
+            obj.Clicked:Fire()
+            obj._onClick()
+        end)
+        return btn
+    end, nil)
+    return obj
+end
+function Button:SetLabel(l)
+    self.Label = l
+    if self._title then self._title.Text = l end
+end
+function Button:SetVisible(v) self.Row:SetVisible(v) end
+function Button:OnClick(fn) self._trove:Connect(self.Clicked, fn) return self end
+
+--==========================================================================
+--  Widget: Label
+--==========================================================================
+local Label = {}
+Label.__index = Label
+local function makeLabel(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Label = spec.Label or "", _label = nil, _textColor = spec.TextColor,
+    }, Label)
+    row:AttachRight(function(parent)
+        local l = Instance.new("TextLabel")
+        l.BackgroundTransparency = 1
+        l.Size = UDim2.new(1, 0, 1, 0)
+        l.Text = obj.Label
+        l.TextSize = spec.TextSize or 16
+        l.TextXAlignment = Enum.TextXAlignment.Right
+        l.TextColor3 = obj._textColor or Tokens.TextColor
+        l.FontFace = menu.Fonts.Main
+        l.BorderSizePixel = 0
+        l.Parent = parent
+        obj._label = l
+        return l
+    end, nil)
+    return obj
+end
+function Label:SetLabel(l)
+    self.Label = l
+    if self._label then self._label.Text = l end
+end
+function Label:SetColor(c)
+    self._textColor = c
+    if self._label then self._label.TextColor3 = c end
+end
+function Label:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Widget: Divider
+--==========================================================================
+local Divider = {}
+Divider.__index = Divider
+local function makeDivider(menu, row, trove, spec)
+    local obj = setmetatable({ _trove = trove, _menu = menu, Row = row, Label = spec.Label or "" }, Divider)
+    row:AttachRight(function(parent)
+        local holder = Instance.new("Frame")
+        holder.BackgroundTransparency = 1
+        holder.Size = UDim2.new(1, 0, 0, 16)
+        holder.Parent = parent
+        local layout = Instance.new("UIListLayout", holder)
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.HorizontalFlex = Enum.UIFlexAlignment.Fill
+        local function bar(order)
+            local f = Instance.new("Frame")
+            f.BackgroundTransparency = 0.7
+            f.BorderSizePixel = 0
+            f.Size = UDim2.fromOffset(0, 1)
+            f.LayoutOrder = order
+            f.BackgroundColor3 = Tokens.TextColor
+            f.Parent = holder
+            Instance.new("UIFlexItem", f).FlexMode = Enum.UIFlexMode.Fill
+        end
+        bar(0)
+        if obj.Label ~= "" then
+            local l = Instance.new("TextLabel")
+            l.BackgroundTransparency = 1
+            l.Size = UDim2.fromScale(0, 1)
+            l.AutomaticSize = Enum.AutomaticSize.X
+            l.Text = obj.Label:upper()
+            l.TextSize = 12
+            l.TextColor3 = Tokens.Unselected
+            l.FontFace = menu.Fonts.SemiBold
+            l.LayoutOrder = 1
+            l.BorderSizePixel = 0
+            l.Parent = holder
+            local pad = Instance.new("UIPadding", l)
+            pad.PaddingLeft = UDim.new(0, 8)
+            pad.PaddingRight = UDim.new(0, 8)
+        end
+        bar(2)
+        return holder
+    end, nil)
+    return obj
+end
+function Divider:SetLabel(l) self.Label = l end
+function Divider:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Widget: Slider
+--==========================================================================
+local Slider = {}
+Slider.__index = Slider
+local function makeSlider(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Min = spec.Min or 0, Max = spec.Max or 100, Step = spec.Step or 1,
+        Value = spec.Default or spec.Min or 0, Changed = Signal.new(),
+        _onChanged = spec.OnChanged or function() end,
+        Suffix = spec.Suffix or "", _rt = nil,
+    }, Slider)
+    row:AttachRight(function(parent)
+        local holder = Instance.new("Frame")
+        holder.AnchorPoint = Vector2.new(1, 0.5)
+        holder.Position = UDim2.fromScale(1, 0.5)
+        holder.Size = UDim2.fromOffset(140, 20)
+        holder.BackgroundTransparency = 1
+        holder.Parent = parent
+        local track = Instance.new("Frame")
+        track.AnchorPoint = Vector2.new(0, 0.5)
+        track.Position = UDim2.new(0, 0, 0.5, 0)
+        track.Size = UDim2.new(1, -50, 0, 3)
+        track.BackgroundColor3 = Tokens.GradientMid
+        track.BorderSizePixel = 0
+        track.Parent = holder
+        Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.fromScale(0, 1)
+        fill.BackgroundColor3 = Tokens.Accent
+        fill.BorderSizePixel = 0
+        fill.Parent = track
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+        local knob = Instance.new("Frame")
+        knob.AnchorPoint = Vector2.new(0.5, 0.5)
+        knob.Position = UDim2.fromScale(0, 0.5)
+        knob.Size = UDim2.fromOffset(12, 12)
+        knob.BackgroundColor3 = Tokens.Accent
+        knob.BorderSizePixel = 0
+        knob.Parent = track
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+        local box = Instance.new("TextBox")
+        box.AnchorPoint = Vector2.new(1, 0.5)
+        box.Position = UDim2.new(1, 0, 0.5, 0)
+        box.Size = UDim2.fromOffset(44, 20)
+        box.BackgroundColor3 = Tokens.ElementBackground
+        box.Text = tostring(obj.Value) .. obj.Suffix
+        box.TextSize = 13
+        box.TextColor3 = Tokens.TextColor
+        box.FontFace = menu.Fonts.SemiBold
+        box.BorderSizePixel = 0
+        box.Parent = holder
+        Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+        obj._rt = { Track = track, Fill = fill, Knob = knob, Box = box }
+        local function render(v)
+            local t = obj.Max == obj.Min and 0 or (v - obj.Min) / (obj.Max - obj.Min)
+            fill.Size = UDim2.fromScale(t, 1)
+            knob.Position = UDim2.fromScale(t, 0.5)
+            if not box:IsFocused() then box.Text = tostring(v) .. obj.Suffix end
+        end
+        local dragging = false
+        local function updateFromX(x)
+            local tp, ts = track.AbsolutePosition.X, track.AbsoluteSize.X
+            if ts <= 0 then return end
+            local t = math.clamp((x - tp) / ts, 0, 1)
+            local raw = obj.Min + (obj.Max - obj.Min) * t
+            obj:Set(math.round(raw / obj.Step) * obj.Step)
+        end
+        trove:Connect(track.InputBegan, function(i)
+            local t = i.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                dragging = true; updateFromX(i.Position.X)
+            end
+        end)
+        trove:Connect(knob.InputBegan, function(i)
+            local t = i.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                dragging = true
+            end
+        end)
+        trove:Connect(UserInputService.InputChanged, function(i)
+            if not dragging then return end
+            local t = i.UserInputType
+            if t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch then
+                updateFromX(i.Position.X)
+            end
+        end)
+        trove:Connect(UserInputService.InputEnded, function(i)
+            local t = i.UserInputType
+            if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        trove:Connect(box.FocusLost, function()
+            local n = tonumber(box.Text:match("[%d%.%-]+"))
+            if n then obj:Set(n) else render(obj.Value) end
+        end)
+        trove:Connect(obj.Changed, render)
+        render(obj.Value)
+        return holder
+    end, 140)
+    return obj
+end
+function Slider:Set(v, instant)
+    v = math.clamp(math.round(v / self.Step) * self.Step, self.Min, self.Max)
+    if v == self.Value then return end
+    self.Value = v
+    if instant then
+        local rt = self._rt
+        if rt then
+            local t = self.Max == self.Min and 0 or (v - self.Min) / (self.Max - self.Min)
+            rt.Fill.Size = UDim2.fromScale(t, 1)
+            rt.Knob.Position = UDim2.fromScale(t, 0.5)
+            rt.Box.Text = tostring(v) .. self.Suffix
+        end
+    else
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function Slider:SetVisible(v) self.Row:SetVisible(v) end
+function Slider:OnChanged(fn) self._trove:Connect(self.Changed, fn) return self end
+
+--==========================================================================
+--  Widget: TextBox
+--==========================================================================
+local TextBox = {}
+TextBox.__index = TextBox
+local function makeTextBox(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Value = spec.Default or "", Changed = Signal.new(),
+        _onChanged = spec.OnChanged or function() end,
+        Placeholder = spec.Placeholder or "", FocusLostOnly = spec.FocusLostOnly == true,
+        _rt = nil, _input = nil,
+    }, TextBox)
+    row:AttachRight(function(parent)
+        local frame = Instance.new("Frame")
+        frame.AnchorPoint = Vector2.new(1, 0.5)
+        frame.Position = UDim2.fromScale(1, 0.5)
+        frame.Size = UDim2.fromOffset(200, 22)
+        frame.BackgroundColor3 = Tokens.ElementBackground
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 5)
+        local stroke = Instance.new("UIStroke", frame)
+        stroke.Color = Tokens.Outline
+        local input = Instance.new("TextBox")
+        input.BackgroundTransparency = 1
+        input.Size = UDim2.new(1, -10, 1, 0)
+        input.Position = UDim2.fromOffset(5, 0)
+        input.Text = obj.Value
+        input.PlaceholderText = obj.Placeholder
+        input.PlaceholderColor3 = Tokens.Unselected
+        input.TextColor3 = Tokens.TextColor
+        input.TextSize = 14
+        input.TextXAlignment = Enum.TextXAlignment.Left
+        input.ClearTextOnFocus = false
+        input.FontFace = menu.Fonts.Main
+        input.BorderSizePixel = 0
+        input.Parent = frame
+        obj._input = input
+        obj._rt = frame
+        trove:Connect(input:GetPropertyChangedSignal("Text"), function()
+            if not obj.FocusLostOnly then obj:Set(input.Text) end
+        end)
+        trove:Connect(input.FocusLost, function()
+            if obj.FocusLostOnly then obj:Set(input.Text) end
+            TweenService:Create(input, TweenInfo.new(0.1), { TextColor3 = Tokens.TextColor }):Play()
+        end)
+        trove:Connect(input.Focused, function()
+            TweenService:Create(input, TweenInfo.new(0.1), { TextColor3 = Tokens.Accent }):Play()
+        end)
+        trove:Connect(obj.Changed, function(v)
+            if input.Text ~= v and not input:IsFocused() then input.Text = v end
+        end)
+        return frame
+    end, nil)
+    return obj
+end
+function TextBox:Set(v, instant)
+    if type(v) == "boolean" or v == nil then return end
+    v = tostring(v)
+    if v == self.Value then return end
+    self.Value = v
+    if not instant then
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function TextBox:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Widget: Dropdown
+--==========================================================================
+local Dropdown = {}
+Dropdown.__index = Dropdown
+local function makeDropdown(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Options = table.clone(spec.Options or {}),
+        Value = spec.Default or (spec.Options and spec.Options[1]),
+        Changed = Signal.new(), _onChanged = spec.OnChanged or function() end,
+        _rt = nil, _panel = nil, CloseOnSelect = spec.CloseOnSelect == true,
+    }, Dropdown)
+    row:AttachRight(function(parent)
+        local btn = Instance.new("TextButton")
+        btn.AnchorPoint = Vector2.new(1, 0.5)
+        btn.Position = UDim2.fromScale(1, 0.5)
+        btn.Size = UDim2.fromOffset(140, 22)
+        btn.BackgroundColor3 = Tokens.ElementBackground
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.BorderSizePixel = 0
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+        local stroke = Instance.new("UIStroke", btn)
+        stroke.Color = Tokens.Outline
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.new(1, -20, 1, 0)
+        label.Position = UDim2.fromOffset(8, 0)
+        label.Text = obj.Value ~= nil and tostring(obj.Value) or "Select"
+        label.TextSize = 14
+        label.TextColor3 = Tokens.TextColor
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.FontFace = menu.Fonts.Main
+        label.Parent = btn
+        obj._rt = { Button = btn, Label = label }
+        trove:Connect(btn.MouseButton1Click, function()
+            if obj._panel and obj._panel.Visible then
+                obj._panel.Visible = false
+                return
+            end
+            if obj._panel == nil then
+                local panel = Instance.new("Frame")
+                panel.AnchorPoint = Vector2.new(1, 0)
+                panel.Position = UDim2.new(1, 0, 1, 4)
+                panel.Size = UDim2.fromOffset(140, math.min(#obj.Options * 24 + 8, 200))
+                panel.BackgroundColor3 = Tokens.GradientTop
+                panel.BorderSizePixel = 0
+                panel.ZIndex = 50
+                panel.Parent = btn
+                Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 6)
+                local stroke2 = Instance.new("UIStroke", panel)
+                stroke2.Color = Tokens.Outline
+                local scroll = Instance.new("ScrollingFrame")
+                scroll.BackgroundTransparency = 1
+                scroll.Size = UDim2.fromScale(1, 1)
+                scroll.BorderSizePixel = 0
+                scroll.CanvasSize = UDim2.fromOffset(0, #obj.Options * 24 + 8)
+                scroll.ScrollBarThickness = 2
+                scroll.ScrollBarImageColor3 = Tokens.Accent
+                scroll.Parent = panel
+                local layout = Instance.new("UIListLayout", scroll)
+                layout.SortOrder = Enum.SortOrder.LayoutOrder
+                local pad = Instance.new("UIPadding", scroll)
+                pad.PaddingTop = UDim.new(0, 4)
+                pad.PaddingBottom = UDim.new(0, 4)
+                obj._panel = panel
+                obj._panelScroll = scroll
+                for i, opt in ipairs(obj.Options) do
+                    local r = Instance.new("TextButton")
+                    r.Size = UDim2.new(1, -8, 0, 24)
+                    r.Position = UDim2.fromOffset(4, (i - 1) * 24 + 4)
+                    r.BackgroundTransparency = (opt == obj.Value) and 0.7 or 1
+                    r.BackgroundColor3 = Tokens.ElementBackground
+                    r.Text = ""
+                    r.AutoButtonColor = false
+                    r.BorderSizePixel = 0
+                    r.LayoutOrder = i
+                    r.Parent = scroll
+                    local lbl = Instance.new("TextLabel")
+                    lbl.BackgroundTransparency = 1
+                    lbl.Size = UDim2.new(1, -8, 1, 0)
+                    lbl.Position = UDim2.fromOffset(8, 0)
+                    lbl.Text = tostring(opt)
+                    lbl.TextSize = 14
+                    lbl.TextColor3 = opt == obj.Value and Tokens.Accent or Tokens.TextColor
+                    lbl.TextXAlignment = Enum.TextXAlignment.Left
+                    lbl.FontFace = menu.Fonts.Main
+                    lbl.Parent = r
+                    trove:Connect(r.MouseButton1Click, function()
+                        obj:Set(opt)
+                        if obj.CloseOnSelect then obj._panel.Visible = false end
+                    end)
+                end
+            end
+            obj._panel.Visible = true
+        end)
+        return btn
+    end, 140)
+    return obj
+end
+function Dropdown:Set(v, instant)
+    if v == self.Value then return end
+    self.Value = v
+    if self._rt then self._rt.Label.Text = v ~= nil and tostring(v) or "Select" end
+    if not instant then
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function Dropdown:SetOptions(opts)
+    self.Options = table.clone(opts or {})
+    if self._panel then
+        self._panel:Destroy()
+        self._panel = nil
+    end
+end
+function Dropdown:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Widget: ColorPicker
+--==========================================================================
+local ColorPicker = {}
+ColorPicker.__index = ColorPicker
+local function makeColorPicker(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Value = spec.Default or Color3.fromRGB(255, 255, 255),
+        Changed = Signal.new(), _onChanged = spec.OnChanged or function() end,
+        _rt = nil, _popup = nil, _boxes = nil,
+    }, ColorPicker)
+    row:AttachRight(function(parent)
+        local swatch = Instance.new("TextButton")
+        swatch.AnchorPoint = Vector2.new(1, 0.5)
+        swatch.Position = UDim2.fromScale(1, 0.5)
+        swatch.Size = UDim2.fromOffset(24, 24)
+        swatch.BorderSizePixel = 0
+        swatch.BackgroundColor3 = obj.Value
+        swatch.Text = ""
+        swatch.AutoButtonColor = false
+        swatch.Parent = parent
+        Instance.new("UICorner", swatch).CornerRadius = UDim.new(0, 5)
+        obj._rt = swatch
+        trove:Connect(swatch.MouseButton1Click, function()
+            if obj._popup and obj._popup.Visible then
+                obj._popup.Visible = false
+                return
+            end
+            if obj._popup == nil then
+                local popup = Instance.new("Frame")
+                popup.AnchorPoint = Vector2.new(1, 0)
+                popup.Position = UDim2.new(1, 0, 1, 4)
+                popup.Size = UDim2.fromOffset(180, 110)
+                popup.BackgroundColor3 = Tokens.GradientTop
+                popup.BorderSizePixel = 0
+                popup.ZIndex = 50
+                popup.Parent = swatch
+                Instance.new("UICorner", popup).CornerRadius = UDim.new(0, 6)
+                local stroke = Instance.new("UIStroke", popup)
+                stroke.Color = Tokens.Outline
+                local boxes = {}
+                for i, ch in ipairs({ "R", "G", "B" }) do
+                    local lbl = Instance.new("TextLabel")
+                    lbl.BackgroundTransparency = 1
+                    lbl.Position = UDim2.fromOffset(10, (i - 1) * 28 + 8)
+                    lbl.Size = UDim2.fromOffset(20, 22)
+                    lbl.Text = ch
+                    lbl.TextSize = 14
+                    lbl.TextColor3 = Tokens.TextColor
+                    lbl.TextXAlignment = Enum.TextXAlignment.Left
+                    lbl.FontFace = menu.Fonts.Main
+                    lbl.Parent = popup
+                    local box = Instance.new("TextBox")
+                    box.Position = UDim2.fromOffset(34, (i - 1) * 28 + 8)
+                    box.Size = UDim2.fromOffset(120, 22)
+                    box.BackgroundColor3 = Tokens.ElementBackground
+                    box.Text = tostring(math.round(obj.Value[ch] * 255))
+                    box.TextSize = 13
+                    box.TextColor3 = Tokens.TextColor
+                    box.FontFace = menu.Fonts.Main
+                    box.BorderSizePixel = 0
+                    box.ClearTextOnFocus = false
+                    box.Parent = popup
+                    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 4)
+                    boxes[ch] = box
+                    trove:Connect(box.FocusLost, function()
+                        local n = tonumber(box.Text)
+                        if n == nil then return end
+                        n = math.clamp(n, 0, 255)
+                        obj:Set(Color3.fromRGB(
+                            ch == "R" and n or math.round(obj.Value.R * 255),
+                            ch == "G" and n or math.round(obj.Value.G * 255),
+                            ch == "B" and n or math.round(obj.Value.B * 255)
+                        ))
+                    end)
+                end
+                obj._popup = popup
+                obj._boxes = boxes
+            end
+            obj._popup.Visible = true
+        end)
+        return swatch
+    end, 24)
+    return obj
+end
+function ColorPicker:Set(v, instant)
+    if typeof(v) ~= "Color3" then return end
+    if v == self.Value then return end
+    self.Value = v
+    if self._rt then self._rt.BackgroundColor3 = v end
+    if self._boxes then
+        self._boxes.R.Text = tostring(math.round(v.R * 255))
+        self._boxes.G.Text = tostring(math.round(v.G * 255))
+        self._boxes.B.Text = tostring(math.round(v.B * 255))
+    end
+    if not instant then
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function ColorPicker:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Widget: Keybind (간단 버전 — 키 캡처 후 라벨 표시)
+--==========================================================================
+local Keybind = {}
+Keybind.__index = Keybind
+local function makeKeybind(menu, row, trove, spec)
+    local obj = setmetatable({
+        _trove = trove, _menu = menu, Row = row,
+        Value = spec.Default, Changed = Signal.new(),
+        _onChanged = spec.OnChanged or function() end,
+        _capturing = false, _rt = nil, _conn = nil,
+    }, Keybind)
+    row:AttachRight(function(parent)
+        local btn = Instance.new("TextButton")
+        btn.AnchorPoint = Vector2.new(1, 0.5)
+        btn.Position = UDim2.fromScale(1, 0.5)
+        btn.Size = UDim2.fromOffset(80, 22)
+        btn.BackgroundColor3 = Tokens.ElementBackground
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.BorderSizePixel = 0
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+        local stroke = Instance.new("UIStroke", btn)
+        stroke.Color = Tokens.Outline
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.fromScale(1, 1)
+        label.Text = obj.Value and obj.Value.Name or "None"
+        label.TextSize = 13
+        label.TextColor3 = Tokens.TextColor
+        label.FontFace = menu.Fonts.SemiBold
+        label.Parent = btn
+        obj._rt = { Button = btn, Label = label }
+
+        trove:Connect(btn.MouseButton1Click, function()
+            if obj._capturing then
+                obj._capturing = false
+                if obj._conn then obj._conn:Disconnect() obj._conn = nil end
+                label.Text = obj.Value and obj.Value.Name or "None"
+                label.TextColor3 = Tokens.TextColor
+                return
+            end
+            obj._capturing = true
+            label.Text = "..."
+            label.TextColor3 = Tokens.Accent
+            obj._conn = UserInputService.InputBegan:Connect(function(input, gp)
+                if gp then return end
+                local key = nil
+                if input.UserInputType == Enum.UserInputType.Keyboard then
+                    key = input.KeyCode
+                elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    key = Enum.UserInputType.MouseButton1
+                elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+                    key = Enum.UserInputType.MouseButton2
+                end
+                if key == nil then return end
+                obj:Set(key)
+                obj._capturing = false
+                if obj._conn then obj._conn:Disconnect() obj._conn = nil end
+            end)
+        end)
+        return btn
+    end, 80)
+    return obj
+end
+function Keybind:Set(v, instant)
+    if v == self.Value then return end
+    self.Value = v
+    if self._rt then
+        self._rt.Label.Text = v and v.Name or "None"
+        self._rt.Label.TextColor3 = Tokens.TextColor
+    end
+    if not instant then
+        self.Changed:Fire(v)
+        self._onChanged(v)
+    end
+end
+function Keybind:SetVisible(v) self.Row:SetVisible(v) end
+
+--==========================================================================
+--  Section 팩토리 주입
+--==========================================================================
+Section._Factories = {
+    Toggle = makeToggle,
+    Button = makeButton,
+    Label = makeLabel,
+    Divider = makeDivider,
+    Slider = makeSlider,
+    TextBox = makeTextBox,
+    Dropdown = makeDropdown,
+    ColorPicker = makeColorPicker,
+    Keybind = makeKeybind,
+}
+
+--==========================================================================
+--  Grid
 --==========================================================================
 local Grid = {}
 Grid.__index = Grid
@@ -345,7 +1241,6 @@ function Menu.new(spec)
     local stroke = Instance.new("UIStroke", root)
     stroke.Color = Tokens.Outline
 
-    -- 타이틀바
     local titleBar = Instance.new("Frame")
     titleBar.Size = UDim2.new(1, 0, 0, 34)
     titleBar.BackgroundColor3 = Tokens.GradientTop
@@ -367,7 +1262,7 @@ function Menu.new(spec)
     title.TextSize = 15
     title.TextColor3 = Tokens.TextColor
     title.TextXAlignment = Enum.TextXAlignment.Left
-    title.FontFace = Core.Fonts.SemiBold
+    title.FontFace = Fonts.SemiBold
     title.Parent = titleBar
 
     local close = Instance.new("TextButton")
@@ -378,13 +1273,12 @@ function Menu.new(spec)
     close.Text = "x"
     close.TextSize = 14
     close.TextColor3 = Color3.new(1, 1, 1)
-    close.FontFace = Core.Fonts.Bold
+    close.FontFace = Fonts.Bold
     close.AutoButtonColor = false
     close.BorderSizePixel = 0
     close.Parent = titleBar
     Instance.new("UICorner", close).CornerRadius = UDim.new(0, 5)
 
-    -- 탭바
     local tabsBar = Instance.new("ScrollingFrame")
     tabsBar.Position = UDim2.fromOffset(0, 34)
     tabsBar.Size = UDim2.new(1, 0, 0, 34)
@@ -403,7 +1297,6 @@ function Menu.new(spec)
     tabsPad.PaddingLeft = UDim.new(0, 8)
     tabsPad.PaddingRight = UDim.new(0, 8)
 
-    -- 페이지 프레임
     local pageFrame = Instance.new("Frame")
     pageFrame.Position = UDim2.fromOffset(0, 68)
     pageFrame.Size = UDim2.new(1, 0, 1, -68)
@@ -414,13 +1307,13 @@ function Menu.new(spec)
     local menu = setmetatable({
         _trove = trove, _gui = gui, _root = root, _tabsBar = tabsBar,
         _pageFrame = pageFrame, _tabs = {}, _currentTab = nil,
-        Fonts = Core.Fonts,
+        Fonts = Fonts,
     }, Menu)
 
     trove:Connect(close.MouseButton1Click, function()
         gui.Enabled = false
     end)
-    K.onUnload(function() pcall(function() gui:Destroy() end) end)
+    onUnload(function() pcall(function() gui:Destroy() end) end)
     return menu
 end
 function Menu:AddTab(spec)
@@ -475,25 +1368,6 @@ function Menu:Destroy()
     self._trove:Destroy()
     self._gui:Destroy()
 end
-
---==========================================================================
---  위젯 로드 및 팩토리 주입
---==========================================================================
-local Basic   = fetch("widgets/basic.lua")(Core)
-local Input   = fetch("widgets/input.lua")(Core)
-local Misc    = fetch("widgets/misc.lua")(Core)
-
-Section._Factories = {
-    Toggle      = Basic.Toggle,
-    Button      = Basic.Button,
-    Label       = Basic.Label,
-    Divider     = Basic.Divider,
-    Slider      = Input.Slider,
-    TextBox     = Input.TextBox,
-    Dropdown    = Input.Dropdown,
-    ColorPicker = Misc.ColorPicker,
-    Keybind     = Misc.Keybind,
-}
 
 --==========================================================================
 --  공개 API
