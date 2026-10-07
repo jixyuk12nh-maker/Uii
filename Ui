@@ -1,0 +1,511 @@
+--==========================================================================
+--  Kicia UI — Main Frame
+--  Window / Tab / Grid / Section 시스템
+--  위젯은 widgets/*.lua 에서 불러와서 Section 메서드로 붙임
+--==========================================================================
+local BASE = "https://cdn.jsdelivr.net/gh/YOUR_NAME/kicia-ui@main/"
+
+-- 이미 로드된 인스턴스 있으면 정리
+if getgenv().KiciaUI and getgenv().KiciaUI.Unload then
+    pcall(getgenv().KiciaUI.Unload)
+end
+
+local function fetch(rel)
+    local url = BASE .. rel
+    local src = game:HttpGet(url)
+    assert(#src > 0, "KiciaUI: empty response for " .. url)
+    local fn, err = loadstring(src, "KiciaUI/" .. rel)
+    assert(fn, "KiciaUI: compile error in " .. rel .. ": " .. tostring(err))
+    return fn()
+end
+
+--==========================================================================
+--  코어 로드
+--==========================================================================
+local Core = fetch("lib/core.lua")
+local Signal = Core.Signal
+local Trove = Core.Trove
+local Tokens = Core.Tokens
+local Batch = Core.Batch
+local Util = Core.Util
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+local K = { destroyed = false, cleanups = {} }
+getgenv().KiciaUI = K
+
+function K.onUnload(f) table.insert(K.cleanups, f) end
+
+--==========================================================================
+--  Row (행 컨테이너 — 모든 위젯의 부모)
+--==========================================================================
+local Row = {}
+Row.__index = Row
+function Row.new(menu, spec)
+    return setmetatable({
+        _menu = menu, _height = spec.Height or 24, _visible = true,
+        _attachments = {}, Label = spec.Label, _bare = spec.Bare == true,
+        Frame = nil, _rightOffset = spec.RightOffset or 0,
+    }, Row)
+end
+function Row:AttachRight(build, width)
+    local a = { Build = build, Width = width, Widget = nil }
+    table.insert(self._attachments, a)
+    return a
+end
+function Row:Realize(parent, ctx, order)
+    local frame = Instance.new("TextButton")
+    frame.BackgroundTransparency = 1
+    frame.Size = UDim2.new(1, 0, 0, self._height)
+    frame.BorderSizePixel = 0
+    frame.AutomaticSize = Enum.AutomaticSize.Y
+    frame.AutoButtonColor = false
+    frame.Text = ""
+    frame.LayoutOrder = order
+    frame.Visible = self._visible
+    frame.Parent = parent
+    self.Frame = frame
+
+    local label = Instance.new("TextLabel")
+    label.Text = self.Label or ""
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.fromOffset(0, 2)
+    label.Size = UDim2.fromOffset(0, self._height - 4)
+    label.AutomaticSize = Enum.AutomaticSize.X
+    label.TextSize = 16
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.FontFace = ctx.Menu.Fonts.Main
+    label.BorderSizePixel = 0
+    ctx.Batch:Bind(label, "TextColor3", "TextColor")
+    label.Parent = frame
+    self.TitleLabel = label
+
+    local right = Instance.new("Frame")
+    right.BackgroundTransparency = 1
+    right.AnchorPoint = Vector2.new(1, 0)
+    right.Position = UDim2.new(1, self._rightOffset, 0, 0)
+    right.Size = UDim2.new(0.55, 0, 0, self._height)
+    right.BorderSizePixel = 0
+    right.Parent = frame
+    self.Right = right
+
+    for _, a in ipairs(self._attachments) do
+        if a.Widget == nil then
+            a.Widget = a.Build(right, ctx)
+        end
+    end
+end
+function Row:SetVisible(v)
+    if self._visible == v then return end
+    self._visible = v
+    if self.Frame then self.Frame.Visible = v end
+end
+function Row:SetLabel(l)
+    self.Label = l
+    if self.TitleLabel then self.TitleLabel.Text = l end
+end
+
+--==========================================================================
+--  Section (엘리먼트 나열 컨테이너)
+--==========================================================================
+local Section = {}
+Section.__index = Section
+function Section.new(menu, trove, spec, resolveParent)
+    return setmetatable({
+        _menu = menu, _trove = trove, Title = spec.Title or "",
+        _side = spec.Side or "left", _resolveParent = resolveParent,
+        _entries = {}, _realized = false, _elements = nil, _rootFrame = nil,
+    }, Section)
+end
+function Section:_Realize()
+    if self._realized then return end
+    self._realized = true
+    local parent = self._resolveParent and self._resolveParent() or nil
+    if parent == nil then return end
+
+    local root = Instance.new("Frame")
+    root.BackgroundTransparency = 1
+    root.Size = UDim2.new(1, 0, 0, 0)
+    root.AutomaticSize = Enum.AutomaticSize.Y
+    root.BorderSizePixel = 0
+    root.LayoutOrder = #parent:GetChildren() + 1
+    root.Parent = parent
+    self._rootFrame = root
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = root
+
+    if self.Title ~= "" then
+        local title = Instance.new("TextLabel")
+        title.Text = self.Title
+        title.BackgroundTransparency = 1
+        title.Size = UDim2.new(1, 0, 0, 16)
+        title.TextSize = 15
+        title.TextColor3 = Tokens.TextColor
+        title.TextXAlignment = Enum.TextXAlignment.Left
+        title.FontFace = self._menu.Fonts.SemiBold
+        title.LayoutOrder = 0
+        title.Parent = root
+    end
+
+    local box = Instance.new("Frame")
+    box.BackgroundColor3 = Tokens.GradientMid
+    box.Size = UDim2.new(1, 0, 0, 0)
+    box.AutomaticSize = Enum.AutomaticSize.Y
+    box.BorderSizePixel = 0
+    box.LayoutOrder = 1
+    box.Parent = root
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    local stroke = Instance.new("UIStroke", box)
+    stroke.Color = Tokens.Outline
+
+    local pad = Instance.new("UIPadding", box)
+    pad.PaddingTop = UDim.new(0, 10)
+    pad.PaddingBottom = UDim.new(0, 10)
+    pad.PaddingLeft = UDim.new(0, 10)
+    pad.PaddingRight = UDim.new(0, 10)
+
+    local elements = Instance.new("Frame")
+    elements.BackgroundTransparency = 1
+    elements.Size = UDim2.new(1, 0, 0, 0)
+    elements.AutomaticSize = Enum.AutomaticSize.Y
+    elements.BorderSizePixel = 0
+    elements.Parent = box
+    local elayout = Instance.new("UIListLayout", elements)
+    elayout.Padding = UDim.new(0, 6)
+    elayout.SortOrder = Enum.SortOrder.LayoutOrder
+    self._elements = elements
+
+    local ctx = { Menu = self._menu, Batch = Batch.newBatch(self._trove) }
+    for i, entry in ipairs(self._entries) do
+        entry.Row:Realize(elements, ctx, i)
+    end
+end
+function Section:_AddRow(row, spec)
+    table.insert(self._entries, { Row = row, Spec = spec })
+    if self._realized then
+        local ctx = { Menu = self._menu, Batch = Batch.newBatch(self._trove) }
+        row:Realize(self._elements, ctx, #self._entries)
+    end
+    return row
+end
+
+--  위젯 팩토리 (widgets/*.lua 가 여기로 주입됨)
+Section._Factories = {}
+function Section:AddToggle(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.Toggle(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddButton(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.Button(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddLabel(spec)
+    local row = Row.new(self._menu, { Bare = true })
+    self:_AddRow(row, spec)
+    return Section._Factories.Label(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddDivider(spec)
+    local row = Row.new(self._menu, { Bare = true })
+    self:_AddRow(row, spec or {})
+    return Section._Factories.Divider(self._menu, row, self._trove:Extend(), spec or {})
+end
+function Section:AddSlider(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.Slider(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddTextBox(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.TextBox(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddDropdown(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.Dropdown(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddColor(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.ColorPicker(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:AddKeybind(spec)
+    local row = Row.new(self._menu, { Label = spec.Label, Tooltip = spec.Tooltip })
+    self:_AddRow(row, spec)
+    return Section._Factories.Keybind(self._menu, row, self._trove:Extend(), spec)
+end
+function Section:SetTitle(t) self.Title = t end
+
+--==========================================================================
+--  Grid (섹션을 컬럼으로 배치)
+--==========================================================================
+local Grid = {}
+Grid.__index = Grid
+function Grid.new(menu, parent, trove, spec)
+    return setmetatable({
+        _menu = menu, _trove = trove, _parent = parent,
+        Columns = spec.Columns or 2, _realized = false, _fullPage = nil,
+    }, Grid)
+end
+function Grid:_Build()
+    if self._realized then return end
+    self._realized = true
+    if self._parent == nil then return end
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.BackgroundTransparency = 1
+    scroll.Size = UDim2.fromScale(1, 1)
+    scroll.BorderSizePixel = 0
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Tokens.Accent
+    scroll.Parent = self._parent
+    local layout = Instance.new("UIGridLayout")
+    layout.CellSize = UDim2.new(0.5, -6, 0, 0)
+    layout.CellPadding = UDim2.fromOffset(12, 12)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.FillDirectionMaxCells = self.Columns
+    layout.Parent = scroll
+    self._fullPage = scroll
+end
+function Grid:AddSection(spec)
+    self:_Build()
+    local self2 = self
+    local section = Section.new(self._menu, self._trove:Extend(), spec, function()
+        return self2._fullPage
+    end)
+    section:_Realize()
+    return section
+end
+function Grid:Realize() self:_Build() end
+
+--==========================================================================
+--  Tab
+--==========================================================================
+local Tab = {}
+Tab.__index = Tab
+function Tab.new(menu, parent, trove, spec)
+    return setmetatable({
+        _menu = menu, _trove = trove, Label = spec.Label or "Tab",
+        _parent = parent, _page = nil, _realized = false,
+    }, Tab)
+end
+function Tab:_Build(pageFrame)
+    if self._realized then return end
+    self._realized = true
+    local page = Instance.new("Frame")
+    page.BackgroundTransparency = 1
+    page.Size = UDim2.fromScale(1, 1)
+    page.BorderSizePixel = 0
+    page.Parent = pageFrame
+    page.Visible = false
+    self._page = page
+end
+function Tab:Grid(spec)
+    self:_Build(self._parent._pageFrame)
+    return Grid.new(self._menu, self._page, self._trove, spec or {})
+end
+function Tab:SetVisible(v)
+    if self._page then self._page.Visible = v end
+end
+
+--==========================================================================
+--  Menu
+--==========================================================================
+local Menu = {}
+Menu.__index = Menu
+function Menu.new(spec)
+    local trove = Trove.new("menu")
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "KiciaUI"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 100
+    gui.Parent = Util.gethui()
+
+    local root = Instance.new("Frame")
+    root.BackgroundColor3 = Tokens.Background
+    root.Size = UDim2.fromOffset(700, 460)
+    root.Position = UDim2.fromScale(0.5, 0.5)
+    root.AnchorPoint = Vector2.new(0.5, 0.5)
+    root.BorderSizePixel = 0
+    root.Active = true
+    root.Draggable = true
+    root.Parent = gui
+    Instance.new("UICorner", root).CornerRadius = UDim.new(0, 8)
+    local stroke = Instance.new("UIStroke", root)
+    stroke.Color = Tokens.Outline
+
+    -- 타이틀바
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 34)
+    titleBar.BackgroundColor3 = Tokens.GradientTop
+    titleBar.BorderSizePixel = 0
+    titleBar.Parent = root
+    Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 8)
+    local cover = Instance.new("Frame")
+    cover.Position = UDim2.new(0, 0, 1, -8)
+    cover.Size = UDim2.new(1, 0, 0, 8)
+    cover.BackgroundColor3 = Tokens.GradientTop
+    cover.BorderSizePixel = 0
+    cover.Parent = titleBar
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.fromOffset(12, 0)
+    title.Size = UDim2.new(1, -40, 1, 0)
+    title.Text = spec.Title or "Kicia UI"
+    title.TextSize = 15
+    title.TextColor3 = Tokens.TextColor
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.FontFace = Core.Fonts.SemiBold
+    title.Parent = titleBar
+
+    local close = Instance.new("TextButton")
+    close.AnchorPoint = Vector2.new(1, 0.5)
+    close.Position = UDim2.new(1, -8, 0.5, 0)
+    close.Size = UDim2.fromOffset(22, 22)
+    close.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    close.Text = "x"
+    close.TextSize = 14
+    close.TextColor3 = Color3.new(1, 1, 1)
+    close.FontFace = Core.Fonts.Bold
+    close.AutoButtonColor = false
+    close.BorderSizePixel = 0
+    close.Parent = titleBar
+    Instance.new("UICorner", close).CornerRadius = UDim.new(0, 5)
+
+    -- 탭바
+    local tabsBar = Instance.new("ScrollingFrame")
+    tabsBar.Position = UDim2.fromOffset(0, 34)
+    tabsBar.Size = UDim2.new(1, 0, 0, 34)
+    tabsBar.BackgroundColor3 = Tokens.GradientMid
+    tabsBar.BorderSizePixel = 0
+    tabsBar.ScrollBarThickness = 0
+    tabsBar.ScrollingDirection = Enum.ScrollingDirection.X
+    tabsBar.CanvasSize = UDim2.new(0, 0, 0, 0)
+    tabsBar.AutomaticCanvasSize = Enum.AutomaticSize.X
+    tabsBar.Parent = root
+    local tabsLayout = Instance.new("UIListLayout", tabsBar)
+    tabsLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    tabsLayout.Padding = UDim.new(0, 6)
+    local tabsPad = Instance.new("UIPadding", tabsBar)
+    tabsPad.PaddingLeft = UDim.new(0, 8)
+    tabsPad.PaddingRight = UDim.new(0, 8)
+
+    -- 페이지 프레임
+    local pageFrame = Instance.new("Frame")
+    pageFrame.Position = UDim2.fromOffset(0, 68)
+    pageFrame.Size = UDim2.new(1, 0, 1, -68)
+    pageFrame.BackgroundTransparency = 1
+    pageFrame.BorderSizePixel = 0
+    pageFrame.Parent = root
+
+    local menu = setmetatable({
+        _trove = trove, _gui = gui, _root = root, _tabsBar = tabsBar,
+        _pageFrame = pageFrame, _tabs = {}, _currentTab = nil,
+        Fonts = Core.Fonts,
+    }, Menu)
+
+    trove:Connect(close.MouseButton1Click, function()
+        gui.Enabled = false
+    end)
+    K.onUnload(function() pcall(function() gui:Destroy() end) end)
+    return menu
+end
+function Menu:AddTab(spec)
+    local tab = Tab.new(self, self, self._trove:Extend(), spec)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(90, 24)
+    btn.BackgroundColor3 = Tokens.ElementBackground
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = #self._tabs + 1
+    btn.Parent = self._tabsBar
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.fromScale(1, 1)
+    label.Text = spec.Label or "Tab"
+    label.TextSize = 14
+    label.TextColor3 = Tokens.Unselected
+    label.FontFace = self.Fonts.Medium
+    label.Parent = btn
+    tab._button = btn
+    tab._label = label
+
+    table.insert(self._tabs, tab)
+    tab:_Build(self._pageFrame)
+
+    local self2 = self
+    self._trove:Connect(btn.MouseButton1Click, function()
+        for _, t in ipairs(self2._tabs) do
+            t:SetVisible(false)
+            t._label.TextColor3 = Tokens.Unselected
+            t._button.BackgroundColor3 = Tokens.ElementBackground
+        end
+        tab:SetVisible(true)
+        tab._label.TextColor3 = Tokens.Accent
+        tab._button.BackgroundColor3 = Tokens.TabButtonSelected
+        self2._currentTab = tab
+    end)
+
+    if self._currentTab == nil then
+        for _, t in ipairs(self._tabs) do t:SetVisible(false) end
+        tab:SetVisible(true)
+        tab._label.TextColor3 = Tokens.Accent
+        tab._button.BackgroundColor3 = Tokens.TabButtonSelected
+        self._currentTab = tab
+    end
+    return tab
+end
+function Menu:SetVisible(v) self._gui.Enabled = v end
+function Menu:Destroy()
+    self._trove:Destroy()
+    self._gui:Destroy()
+end
+
+--==========================================================================
+--  위젯 로드 및 팩토리 주입
+--==========================================================================
+local Basic   = fetch("widgets/basic.lua")(Core)
+local Input   = fetch("widgets/input.lua")(Core)
+local Misc    = fetch("widgets/misc.lua")(Core)
+
+Section._Factories = {
+    Toggle      = Basic.Toggle,
+    Button      = Basic.Button,
+    Label       = Basic.Label,
+    Divider     = Basic.Divider,
+    Slider      = Input.Slider,
+    TextBox     = Input.TextBox,
+    Dropdown    = Input.Dropdown,
+    ColorPicker = Misc.ColorPicker,
+    Keybind     = Misc.Keybind,
+}
+
+--==========================================================================
+--  공개 API
+--==========================================================================
+K.newMenu = function(spec) return Menu.new(spec or {}) end
+K.Tokens = Tokens
+K.refreshToken = Batch.refresh
+K.Unload = function()
+    if K.destroyed then return end
+    K.destroyed = true
+    for _, f in ipairs(K.cleanups) do pcall(f) end
+    if getgenv().KiciaUI == K then getgenv().KiciaUI = nil end
+end
+
+return K
